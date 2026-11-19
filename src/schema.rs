@@ -5,8 +5,9 @@ use std::{
     sync::Arc,
 };
 
-use chrono::{DateTime, TimeZone};
+use chrono::{DateTime, NaiveDate, TimeZone};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 #[cfg(test)]
 mod tests;
@@ -77,8 +78,10 @@ mod tests;
 /// - An `Option` may also be null, unless it is the type of an optional field,
 ///   which serde leaves out instead of writing null. A `Box`, an `Rc`, an
 ///   `Arc`, a `Cow` and a reference are described like what they hold.
-/// - A chrono `DateTime` is a string in the date-time format, a
-///   `serde_json::Number` a number, and a `serde_json::Value` allows any value.
+/// - A chrono `DateTime` is a string in the date-time format, a chrono
+///   `NaiveDate` a string in the date format, a `uuid::Uuid` a string in the
+///   uuid format, a `serde_json::Number` a number, and a `serde_json::Value`
+///   allows any value.
 ///
 /// A value that may be null is an `Option`, such as an `Option<Vec<_>>` or an
 /// `Option<HashMap<_, _>>`, since serde never writes a `Vec` or a `HashMap` as
@@ -175,6 +178,8 @@ macro_rules! described_as {
 
 described_as!({ "type": "boolean" } => bool);
 described_as!({ "type": "string" } => String, str, char);
+described_as!({ "type": "string", "format": "date" } => NaiveDate);
+described_as!({ "type": "string", "format": "uuid" } => Uuid);
 described_as!({ "type": "integer" } => i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
 described_as!({ "type": "number" } => f32, f64, serde_json::Number);
 described_as!({} => Value);

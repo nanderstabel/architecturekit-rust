@@ -14,9 +14,10 @@ use std::{
     sync::Arc,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{Event, Schema};
 
@@ -306,6 +307,20 @@ fn describes_a_time_as_a_date_time_string() {
 
     assert_schema::<Loan>(
         r#"{"additionalProperties":false,"properties":{"at":{"format":"date-time","type":"string"},"until":{"anyOf":[{"format":"date-time","type":"string"},{"type":"null"}]}},"required":["at","until"],"type":"object"}"#,
+    );
+}
+
+#[test]
+fn describes_a_naive_date_as_a_date_string_and_a_uuid_as_a_uuid_string() {
+    #[derive(Serialize, Schema)]
+    struct Booking {
+        id: Uuid,
+        check_in: NaiveDate,
+        check_out: Option<NaiveDate>,
+    }
+
+    assert_schema::<Booking>(
+        r#"{"additionalProperties":false,"properties":{"check_in":{"format":"date","type":"string"},"check_out":{"anyOf":[{"format":"date","type":"string"},{"type":"null"}]},"id":{"format":"uuid","type":"string"}},"required":["id","check_in","check_out"],"type":"object"}"#,
     );
 }
 
