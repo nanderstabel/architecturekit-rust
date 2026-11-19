@@ -165,6 +165,25 @@ impl<E: Events> Envelope<E> {
     }
 }
 
+impl<E> Envelope<E> {
+    /// Replaces the data of the envelope with the result of `f`, keeping all
+    /// metadata unchanged.
+    #[must_use]
+    pub fn map<U>(self, f: impl FnOnce(E) -> U) -> Envelope<U> {
+        Envelope {
+            id: self.id,
+            time: self.time,
+            source: self.source,
+            subject: self.subject,
+            event_type: self.event_type,
+            trace_parent: self.trace_parent,
+            trace_state: self.trace_state,
+            part: self.part,
+            data: f(self.data),
+        }
+    }
+}
+
 mod sealed {
     pub trait Sealed {}
 
