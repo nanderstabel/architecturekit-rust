@@ -265,8 +265,8 @@ pub use revision::{
 pub use schema::Schema;
 pub use state::{EventSchema, Events, State, replay, replay_stored, step, step_stored};
 pub use store::{
-    Error, EventOn, ExecuteError, LoadError, ReadError, RegisterSchemasError, Store, StoreBuilder,
-    WriteError,
+    Error, EventOn, EventStore, EventStoreError, EventStoreFuture, EventStream, EventTypeStream,
+    ExecuteError, LoadError, ReadError, RegisterSchemasError, Store, StoreBuilder, WriteError,
 };
 pub use subject::{NotASubject, Subject, SubjectScheme, SubjectValuesError};
 pub use upcast::{UpcastEvent, Upcasters};

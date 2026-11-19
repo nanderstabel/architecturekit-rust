@@ -3,6 +3,7 @@
 use eventsourcingdb::error::{ClientError, DbApiError, code};
 use status::{CONFLICT, OK, REQUEST_TIMEOUT, TOO_MANY_REQUESTS, UNAUTHORIZED};
 
+use super::event_store::EventStoreError;
 use crate::{Failure, Permanent, Transient};
 
 /// The statuses the rules name, as numbers, so that this does not depend on the
@@ -92,7 +93,35 @@ fn answer_of(error: &ClientError) -> Option<&DbApiError> {
 /// unless its description says that an event does not match its schema, which
 /// is permanent. Every other status means that the request itself is wrong,
 /// which is permanent, and a rejected API token is named.
-pub(crate) fn database_failure(error: ClientError, doing: &str) -> Sorted {
+pub(crate) fn database_failure(error: EventStoreError, doing: &str) -> Sorted {
+    let error = match error {
+        EventStoreError::Client(error) => *error,
+        EventStoreError::PreconditionViolated { .. } => {
+            return Sorted::Transient(Transient::Conflict(Failure::new(
+                doing.to_owned(),
+                Some(Box::new(error)),
+            )));
+        }
+        EventStoreError::SchemaConflict { .. } => {
+            return Sorted::Permanent(Permanent::Other(Failure::new(
+                doing.to_owned(),
+                Some(Box::new(error)),
+            )));
+        }
+        EventStoreError::Transient(cause) | EventStoreError::OutcomeUnknown(cause) => {
+            return Sorted::Transient(Transient::Other(Failure::new(
+                doing.to_owned(),
+                Some(cause),
+            )));
+        }
+        EventStoreError::Permanent(cause) => {
+            return Sorted::Permanent(Permanent::Other(Failure::new(
+                doing.to_owned(),
+                Some(cause),
+            )));
+        }
+    };
+
     let answer = match &error {
         ClientError::IncompatibleServer => {
             return permanent(
@@ -149,11 +178,24 @@ pub(crate) fn database_failure(error: ClientError, doing: &str) -> Sorted {
 ///
 /// A read that is dropped before it is complete returns nothing at all, so a
 /// state built from part of the history can never reach a decision.
-pub(crate) fn read_failure(error: ClientError, doing: &str) -> Sorted {
-    if answer_of(&error)
-        .is_some_and(|answer| answer.code.is_empty() && answer.status.as_u16() == CONFLICT)
-    {
-        return permanent(doing.to_owned(), error);
+pub(crate) fn read_failure(error: EventStoreError, doing: &str) -> Sorted {
+    match &error {
+        EventStoreError::Client(client_error)
+            if answer_of(client_error).is_some_and(|answer| {
+                answer.code.is_empty() && answer.status.as_u16() == CONFLICT
+            }) =>
+        {
+            if let EventStoreError::Client(client_error) = error {
+                return permanent(doing.to_owned(), *client_error);
+            }
+        }
+        EventStoreError::PreconditionViolated { .. } => {
+            return Sorted::Permanent(Permanent::Other(Failure::new(
+                doing.to_owned(),
+                Some(Box::new(error)),
+            )));
+        }
+        _ => {}
     }
 
     database_failure(error, doing)
@@ -166,18 +208,30 @@ pub(crate) fn read_failure(error: ClientError, doing: &str) -> Sorted {
 /// write, or if the database refused it. A write that was certainly not stored
 /// keeps the category that `database_failure` sorts it into, so that trying it
 /// again unchanged can not store the events twice.
-pub(crate) fn write_failure(error: ClientError, doing: &str) -> WriteSorted {
-    let ClientError::OutcomeUnknown(inner) = error else {
-        return WriteSorted::Sorted(database_failure(error, doing));
+pub(crate) fn write_failure(error: EventStoreError, doing: &str) -> WriteSorted {
+    let inner = match error {
+        EventStoreError::Client(client_error) => match *client_error {
+            ClientError::OutcomeUnknown(inner) => *inner,
+            other => {
+                return WriteSorted::Sorted(database_failure(
+                    EventStoreError::Client(Box::new(other)),
+                    doing,
+                ));
+            }
+        },
+        EventStoreError::OutcomeUnknown(cause) => {
+            return WriteSorted::OutcomeUnknown(Failure::new(doing.to_owned(), Some(cause)));
+        }
+        other => return WriteSorted::Sorted(database_failure(other, doing)),
     };
 
-    let message = if matches!(*inner, ClientError::InvalidServerHeader) {
+    let message = if matches!(inner, ClientError::InvalidServerHeader) {
         format!("{doing}: the answer does not come from an EventSourcingDB")
     } else {
         doing.to_owned()
     };
 
-    WriteSorted::OutcomeUnknown(failure(message, *inner))
+    WriteSorted::OutcomeUnknown(failure(message, inner))
 }
 
 /// Tells whether the database refused to register a schema because the event
@@ -185,20 +239,31 @@ pub(crate) fn write_failure(error: ClientError, doing: &str) -> WriteSorted {
 /// it, which only the schemas registered afterwards tell apart. A database that
 /// offers just the v1 API answers both with 409, and any other 409 of it is
 /// taken for one of them, too.
-pub(crate) fn is_schema_conflict(refusal: &ClientError) -> bool {
-    answer_of(refusal).is_some_and(|answer| match answer.code.as_str() {
-        code::EVENT_SCHEMA_ALREADY_REGISTERED | code::EVENT_SCHEMA_VIOLATED => true,
-        "" => answer.status.as_u16() == CONFLICT,
+pub(crate) fn is_schema_conflict(refusal: &EventStoreError) -> bool {
+    match refusal {
+        EventStoreError::SchemaConflict { .. } => true,
+        EventStoreError::Client(client_error) => {
+            answer_of(client_error).is_some_and(|answer| match answer.code.as_str() {
+                code::EVENT_SCHEMA_ALREADY_REGISTERED | code::EVENT_SCHEMA_VIOLATED => true,
+                "" => answer.status.as_u16() == CONFLICT,
+                _ => false,
+            })
+        }
         _ => false,
-    })
+    }
 }
 
 /// Reports that the database refused the schema of an event type, for example
 /// because stored events of the type do not match it, which is permanent,
 /// whatever the reason.
-pub(crate) fn schema_refusal(event_type: &str, refusal: ClientError) -> Permanent {
-    Permanent::Other(failure(
+pub(crate) fn schema_refusal(event_type: &str, refusal: EventStoreError) -> Permanent {
+    let cause: Box<dyn std::error::Error + Send + Sync + 'static> = match refusal {
+        EventStoreError::Client(client_error) => client_error,
+        other => Box::new(other),
+    };
+
+    Permanent::Other(Failure::new(
         format!("the database refused the schema of {event_type:?}"),
-        refusal,
+        Some(cause),
     ))
 }

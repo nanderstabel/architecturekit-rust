@@ -3,7 +3,7 @@ use std::{any, error::Error, fmt};
 use eventsourcingdb::error::{ClientError, code};
 use serde_json::Value;
 
-use crate::{Categorized, Category, Failure, Permanent, Revision, Subject};
+use crate::{Categorized, Category, EventStoreError, Failure, Permanent, Revision, Subject};
 
 #[cfg(test)]
 mod tests;
@@ -280,8 +280,14 @@ pub(crate) fn violated_precondition<'a>(
     conflict: &Failure,
     declared: &'a [Precondition],
 ) -> Option<&'a Precondition> {
-    let Some(ClientError::DbApiError(answer)) = conflict.cause()?.downcast_ref::<ClientError>()
-    else {
+    let cause = conflict.cause()?;
+    if let Some(EventStoreError::PreconditionViolated { index, .. }) =
+        cause.downcast_ref::<EventStoreError>()
+    {
+        return declared.get((*index)?);
+    }
+
+    let Some(ClientError::DbApiError(answer)) = cause.downcast_ref::<ClientError>() else {
         return None;
     };
     if answer.code != code::PRECONDITION_VIOLATED {

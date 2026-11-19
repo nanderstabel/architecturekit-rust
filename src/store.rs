@@ -2,8 +2,7 @@ use std::{collections::HashMap, future::Future, pin::pin, sync::Arc, time::Durat
 
 use ed25519_dalek::VerifyingKey;
 use eventsourcingdb::{
-    Client, EventCandidate,
-    error::ClientError,
+    EventCandidate,
     request_options::{
         Bound, BoundType, ReadEventMissingStrategy, ReadEventsOptions, ReadFromLatestEventOptions,
     },
@@ -25,6 +24,7 @@ use crate::{
 
 mod any;
 mod error;
+mod event_store;
 mod failure;
 pub(crate) mod projecting;
 
@@ -35,13 +35,16 @@ mod tests;
 
 pub use any::Error;
 pub use error::{ExecuteError, LoadError, ReadError, RegisterSchemasError, WriteError};
+pub use event_store::{
+    EventStore, EventStoreError, EventStoreFuture, EventStream, EventTypeStream,
+};
 use failure::{database_failure, is_schema_conflict, read_failure, schema_refusal, write_failure};
 use state_cache::StateCache;
 
-/// Reads from and writes to EventSourcingDB, through the client SDK.
+/// Reads from and writes to an [`EventStore`] such as EventSourcingDB.
 ///
-/// Create one with [`Store::builder`], from a client and the source to use for
-/// all events it writes:
+/// Create one with [`Store::builder`], from an event store (such as an
+/// [`eventsourcingdb::Client`]) and the source to use for all events it writes:
 ///
 /// ```no_run
 /// use architecturekit::{Store, eventsourcingdb::Client};
@@ -56,7 +59,11 @@ use state_cache::StateCache;
 /// [`StoreBuilder::without_hash_verification`].
 #[derive(Debug)]
 pub struct Store {
-    client: Arc<Client>,
+    #[expect(
+        clippy::struct_field_names,
+        reason = "the store wraps an EventStore implementation"
+    )]
+    event_store: Arc<dyn EventStore>,
     source: String,
     verification: Verification,
     conflict_retries: usize,
@@ -74,7 +81,7 @@ enum Verification {
 /// Builds a [`Store`], which [`Store::builder`] creates.
 #[derive(Debug)]
 pub struct StoreBuilder {
-    client: Client,
+    event_store: Arc<dyn EventStore>,
     source: String,
     skips_hashes: bool,
     verification_key: Option<VerifyingKey>,
@@ -230,7 +237,7 @@ impl StoreBuilder {
         };
 
         Store {
-            client: Arc::new(self.client),
+            event_store: self.event_store,
             source: self.source,
             verification,
             conflict_retries: self.conflict_retries,
@@ -264,11 +271,12 @@ impl EventOn {
 
 impl Store {
     /// Creates a builder for a store that reads and writes with the given
-    /// client, and writes its events with the given source.
+    /// [`EventStore`] (such as [`eventsourcingdb::Client`]), and writes its
+    /// events with the given source.
     #[must_use]
-    pub fn builder(client: Client, source: impl Into<String>) -> StoreBuilder {
+    pub fn builder(event_store: impl EventStore, source: impl Into<String>) -> StoreBuilder {
         StoreBuilder {
-            client,
+            event_store: Arc::new(event_store),
             source: source.into(),
             skips_hashes: false,
             verification_key: None,
@@ -343,7 +351,7 @@ impl Store {
         };
 
         let events = self
-            .client
+            .event_store
             .read_events(subject.as_str(), Some(options))
             .await
             .map_err(|error| LoadError::from(read_failure(error, &doing)))?;
@@ -404,7 +412,7 @@ impl Store {
         // A read that the database refuses at once fails here, rather than as
         // the first element of the stream.
         let events = self
-            .client
+            .event_store
             .read_events(
                 subjects.subject().as_str(),
                 Some(database_options(subjects, options, &bounds)),
@@ -633,9 +641,9 @@ impl Store {
         preconditions: Vec<eventsourcingdb::Precondition>,
         doing: String,
     ) -> Result<Vec<eventsourcingdb::Event>, WriteError> {
-        let client = Arc::clone(&self.client);
+        let event_store = Arc::clone(&self.event_store);
         let written = detached(doing.clone(), async move {
-            client.write_events(candidates, preconditions).await
+            event_store.write_events(candidates, preconditions).await
         })
         .await;
 
@@ -678,13 +686,10 @@ impl Store {
 
             if !registered.contains_key(event_type) {
                 let doing = format!("registering schema for {event_type:?}");
-                let client = Arc::clone(&self.client);
+                let event_store = Arc::clone(&self.event_store);
                 let value = schema.schema().clone();
                 let refusal = match detached(doing.clone(), async move {
-                    client
-                        .register_event_schema(event_type, &value)
-                        .await
-                        .map(|_| ())
+                    event_store.register_event_schema(event_type, &value).await
                 })
                 .await
                 {
@@ -738,7 +743,7 @@ impl Store {
     ) -> Result<HashMap<String, Value>, RegisterSchemasError> {
         let doing = "reading the registered schemas";
         let event_types = self
-            .client
+            .event_store
             .read_event_types()
             .await
             .map_err(|error| RegisterSchemasError::from(read_failure(error, doing)))?;
@@ -822,8 +827,8 @@ pub(crate) fn unencodable(event_type: &str, subject: &str, cause: serde_json::Er
 /// has stopped waiting, the failure is logged, since nobody else learns of it.
 async fn detached<T: Send + 'static>(
     doing: String,
-    work: impl Future<Output = Result<T, ClientError>> + Send + 'static,
-) -> Option<Result<T, ClientError>> {
+    work: impl Future<Output = Result<T, EventStoreError>> + Send + 'static,
+) -> Option<Result<T, EventStoreError>> {
     let (sender, receiver) = oneshot::channel();
 
     drop(tokio::spawn(async move {

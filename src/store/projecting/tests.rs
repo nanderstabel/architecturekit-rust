@@ -224,7 +224,7 @@ impl Transaction for Booking {
 fn events(
     ids: &[&str],
     failure: Option<ClientError>,
-) -> impl futures_util::Stream<Item = Result<eventsourcingdb::Event, ClientError>> {
+) -> impl futures_util::Stream<Item = Result<eventsourcingdb::Event, crate::EventStoreError>> {
     let mut items: Vec<_> = ids
         .iter()
         .map(|id| {
@@ -235,7 +235,7 @@ fn events(
             ))
         })
         .collect();
-    items.extend(failure.map(Err));
+    items.extend(failure.map(|error| Err(crate::EventStoreError::from(error))));
 
     stream::iter(items)
 }

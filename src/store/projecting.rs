@@ -12,16 +12,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use eventsourcingdb::{
-    Client,
-    error::ClientError,
-    request_options::{Bound, BoundType, ObserveEventsOptions, ReadEventsOptions},
-};
+use eventsourcingdb::request_options::{Bound, BoundType, ObserveEventsOptions, ReadEventsOptions};
 use futures_util::{FutureExt, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::{
     Store, Verification,
+    event_store::{EventStore, EventStoreError},
     failure::{Sorted, read_failure},
     verify,
 };
@@ -317,7 +314,7 @@ where
 }
 
 /// Turns a failure of reading into one of a projection.
-fn read_failed(error: ClientError) -> ProjectionError {
+fn read_failed(error: EventStoreError) -> ProjectionError {
     match read_failure(error, "reading events") {
         Sorted::Transient(failure) => ProjectionError::Transient(failure),
         Sorted::Permanent(failure) => ProjectionError::Permanent(failure),
@@ -362,7 +359,7 @@ async fn applying<P: Projection + ?Sized>(
 /// is being applied when the token is cancelled is applied to the end.
 pub(crate) async fn drive<W: Writer>(
     writer: &mut W,
-    events: impl Stream<Item = Result<eventsourcingdb::Event, ClientError>>,
+    events: impl Stream<Item = Result<eventsourcingdb::Event, EventStoreError>>,
     verify: impl Fn(&eventsourcingdb::Event) -> Result<(), Permanent>,
     batch_size: usize,
     token: &CancellationToken,
@@ -482,7 +479,7 @@ impl fmt::Debug for Reconnecting {
 /// of its own.
 #[derive(Clone)]
 pub(crate) struct Reader {
-    client: Arc<Client>,
+    event_store: Arc<dyn EventStore>,
     verification: Verification,
 }
 
@@ -514,7 +511,7 @@ impl Reader {
         let requested = tokio::select! {
             biased;
             () = token.cancelled() => None,
-            requested = self.client.read_events(subjects.subject().as_str(), Some(options)) => Some(requested),
+            requested = self.event_store.read_events(subjects.subject().as_str(), Some(options)) => Some(requested),
         };
         let events = match requested {
             None => return (checkpoint, Ok(())),
@@ -575,7 +572,7 @@ impl Reader {
         let requested = tokio::select! {
             biased;
             () = token.cancelled() => None,
-            requested = self.client.observe_events(subjects.subject().as_str(), Some(options)) => Some(requested),
+            requested = self.event_store.observe_events(subjects.subject().as_str(), Some(options)) => Some(requested),
         };
         let events = match requested {
             None => return (caught_up_at.elapsed(), Ok(())),
@@ -675,7 +672,7 @@ impl Store {
     /// Returns what a projection needs of the store to read.
     pub(crate) fn reader(&self) -> Reader {
         Reader {
-            client: Arc::clone(&self.client),
+            event_store: Arc::clone(&self.event_store),
             verification: self.verification.clone(),
         }
     }
